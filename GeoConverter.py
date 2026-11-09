@@ -1,4 +1,5 @@
 import io
+import re
 import json
 import zipfile
 import tempfile
@@ -9,12 +10,13 @@ import streamlit as st
 import geopandas as gpd
 from shapely import wkt
 from pyproj import Geod
+from shapely.ops import transform
 import xml.etree.ElementTree as ET
 from shapely.geometry import shape, Point, Polygon, MultiPolygon, MultiPoint
 
-# ============================================================================================================================================
+#======================================================================================================================================
 # PAGE CONFIGURATION
-# ============================================================================================================================================
+#======================================================================================================================================
 
 st.set_page_config(
     page_title="File Convertor",
@@ -22,9 +24,9 @@ st.set_page_config(
     layout="wide"
 )
 
-# ============================================================================================================================================
+# ======================================================================
 # SIDEBAR SETUP
-# ============================================================================================================================================
+# ======================================================================
 
 st.sidebar.markdown("""
 <style>
@@ -154,9 +156,9 @@ section[data-testid="stSidebar"] {
 """, unsafe_allow_html=True)
 
 
-# ============================================================================================================================================
+# ======================================================================
 # SIDEBAR CONTENT
-# ============================================================================================================================================
+# ======================================================================
 
 st.sidebar.markdown("""
 <div class="sidebar-logo">
@@ -196,9 +198,10 @@ The tool recognises the following geometry column names:
 
 """, unsafe_allow_html=True)
 
-# ============================================================================================================================================
+
+#======================================================================================================================================
 # Divider
-# ============================================================================================================================================
+#======================================================================================================================================
 
 def add_divider():
     st.markdown(
@@ -215,9 +218,9 @@ def add_divider():
         unsafe_allow_html=True
     )
 
-# ============================================================================================================================================
+#======================================================================================================================================
 # DATA LOADING AND PROCESSING COLUMN 
-# ============================================================================================================================================
+#======================================================================================================================================
 
 final_data = pd.DataFrame()
 standardized_df = pd.DataFrame()
@@ -246,6 +249,124 @@ def find_geom_columns(df):
     ]
 
     return geom_columns
+
+
+def clean_geometry(value):
+
+    if pd.isna(value) or not isinstance(value, str):
+        return value
+
+    text = value.strip()
+
+    if not text:
+        return value
+
+    try:
+
+        def strip_zvalues(coords):
+
+            if not coords:
+                return coords
+
+            if isinstance(coords[0], (int, float)):
+                return coords[:2]
+
+            return [strip_zvalues(c) for c in coords]
+
+ 
+        def close_ring(coords, tol=1e-9):
+
+            coords = list(coords)
+
+            if len(coords) > 2:
+
+                x0, y0 = coords[0][:2]
+                x1, y1 = coords[-1][:2]
+
+                if abs(x0 - x1) > tol or abs(y0 - y1) > tol:
+                    coords.append(coords[0])
+
+            return coords
+
+
+        def extract_xy_from_xyz(text):
+
+            triplet_pattern = re.compile(
+                r'(-?\d+(?:\.\d+)?)\s*,\s*'
+                r'(-?\d+(?:\.\d+)?)\s*,\s*'
+                r'(-?\d+(?:\.\d+)?)'
+            )
+
+            matches = triplet_pattern.findall(text)
+
+            return [(float(x), float(y)) for x, y, z in matches]
+
+        def extract_xy_pairs(text):
+
+            pair_pattern = re.compile(
+                r'(-?\d+(?:\.\d+)?)\s*[,\s]\s*'
+                r'(-?\d+(?:\.\d+)?)'
+            )
+
+            pairs = pair_pattern.findall(text)
+
+            return [(float(a), float(b)) for a, b in pairs]
+
+        if '"coordinates"' in text and '"type"' in text:
+
+            geo = json.loads(text)
+
+            geo = geo.get("geometry", geo)
+
+            geo["coordinates"] = strip_zvalues(geo["coordinates"])
+
+            geom = shape(geo)
+
+        elif re.match(
+            r'^\s*(POINT|LINESTRING|POLYGON|MULTIPOINT|MULTILINESTRING|MULTIPOLYGON)',
+            text,
+            re.I
+        ):
+
+            geom = wkt.loads(text)
+
+        else:
+
+            text = re.sub(r'[,\s]+$', '', text)
+
+            xyz_coords = extract_xy_from_xyz(text)
+
+            total_numbers = len(
+                re.findall(r'-?\d+(?:\.\d+)?', text)
+            )
+
+            if len(xyz_coords) >= 3 and len(xyz_coords) * 3 >= 0.6 * total_numbers:
+
+                coords = close_ring(xyz_coords)
+
+                geom = Polygon(coords)
+
+            else:
+
+                coords = extract_xy_pairs(text)
+
+                if len(coords) == 1:
+                    geom = Point(coords[0])
+
+                elif len(coords) >= 3:
+                    geom = Polygon(close_ring(coords))
+
+                else:
+                    return value
+        geom = transform(
+            lambda x, y, z=None: (x, y),
+            geom
+        )
+
+        return geom.wkt
+
+    except Exception:
+        return value
 
 
 #======================================================================================================================================
@@ -296,8 +417,15 @@ def process_point(point):
 
 
 def process_wkt(wkt_string):
+
     try:
         geom = wkt.loads(wkt_string)
+
+        # Remove Z values and retain only X, Y coordinate pairs
+        geom = transform(
+            lambda x, y, z=None: (x, y),
+            geom
+        )
 
         if isinstance(geom, Polygon):
             return process_polygon(geom).wkt
@@ -316,7 +444,7 @@ def process_wkt(wkt_string):
             ).wkt
 
         else:
-            return wkt_string
+            return geom.wkt
 
     except Exception:
         return wkt_string
@@ -333,144 +461,96 @@ def normalize_text(Data):
         )
     return Data
 
+#========================================================================================================================================
+# CONVERSION FUNCTION TO GEODATAFRAME
+#========================================================================================================================================
 
 def convert_to_geodf(Data):
 
     existing_columns = find_geom_columns(Data)
 
-    polygon_cols = [c for c in existing_columns if "polygon" in c.lower()]
-    point_cols = [c for c in existing_columns if "point" in c.lower()]
-
-    geometry_cols = [
-        c for c in existing_columns
-        if c.lower() in ["geometry", "plot_wkt", "wkt", "geom"]
-    ]
-
-    # ======================================================================
-    # PROCESS EXISTING GEOMETRY COLUMNS
-    # ======================================================================
-
     for col in existing_columns:
         Data[col] = Data[col].apply(
-            lambda x: apply_n_times(process_wkt, str(x), 2)
+            lambda x: apply_n_times(process_wkt, clean_geometry(x), 2)
             if pd.notna(x) and str(x).strip() else ""
         )
 
-    # ======================================================================
-    # IDENTIFY LONGITUDE AND LATITUDE COLUMNS
-    # ======================================================================
-
     lon_cols = [
         c for c in Data.columns
-        if any(k in c.lower() for k in ["longitude", "lon", "easting"])
+        if any(k in normalize(c) for k in ["longitude", "lon", "easting"])
+        or normalize(c) == "x"
     ]
 
     lat_cols = [
         c for c in Data.columns
-        if any(k in c.lower() for k in ["latitude", "lat", "northing"])
+        if any(k in normalize(c) for k in ["latitude", "lat", "northing"])
+        or normalize(c) == "y"
     ]
 
-    # ======================================================================
-    # SELECT GEOMETRY
-    # ======================================================================
+    #========================================================================================================================================
+    # SELECT GEOMETRY BY TYPE
+    #========================================================================================================================================
 
     def choose_geometry(row):
 
         polygon = ""
-
-        for col in polygon_cols:
-            val = row.get(col)
-
-            if pd.notna(val) and str(val).strip():
-                try:
-                    geom = wkt.loads(str(val))
-
-                    if geom.geom_type in ["Polygon", "MultiPolygon"]:
-                        polygon = geom.wkt
-                        break
-
-                except Exception:
-                    continue
-
         point = ""
+        other_geometry = ""
 
-        for col in point_cols:
+        for col in existing_columns:
+
             val = row.get(col)
 
-            if pd.notna(val) and str(val).strip():
-                try:
-                    geom = wkt.loads(str(val))
+            if pd.isna(val) or not str(val).strip():
+                continue
 
-                    if geom.geom_type == "Point":
-                        point = geom.wkt
-                        break
+            try:
+                geom = wkt.loads(str(val))
+                geom_type = geom.geom_type
 
-                except Exception:
-                    continue
+                if geom_type in ["Polygon", "MultiPolygon"] and not polygon:
+                    polygon = geom.wkt
 
-        geometry = ""
+                elif geom_type == "Point" and not point:
+                    point = geom.wkt
 
-        for col in geometry_cols:
-            val = row.get(col)
+                elif not other_geometry:
+                    other_geometry = geom.wkt
 
-            if pd.notna(val) and str(val).strip():
-                try:
-                    geom = wkt.loads(str(val))
-                    geometry = geom.wkt
-                    break
-
-                except Exception:
-                    continue
-
-        # ==================================================================
-        # EXTRACT LONGITUDE AND LATITUDE
-        # ==================================================================
+            except Exception:
+                continue
 
         lon = None
+        lat = None
 
         for c in lon_cols:
             val = pd.to_numeric(row.get(c), errors="coerce")
-
             if pd.notna(val):
                 lon = val
                 break
 
-        lat = None
-
         for c in lat_cols:
             val = pd.to_numeric(row.get(c), errors="coerce")
-
             if pd.notna(val):
                 lat = val
                 break
 
-        # ====================================================================================================================================
-        # CREATE POINT FROM COORDINATES
-        # ====================================================================================================================================
-
         coord_wkt = ""
 
-        if pd.notna(lon) and pd.notna(lat):
+        if lon is not None and lat is not None:
             coord_wkt = process_wkt(f"POINT ({lon} {lat})")
 
-        # ====================================================================================================================================
-        # FINAL GEOMETRY PRIORITY
-        # ====================================================================================================================================
-
         final_wkt = (
-            polygon if polygon
-            else point if point
-            else geometry if geometry
+            polygon
+            if polygon
+            else point
+            if point
+            else other_geometry
+            if other_geometry
             else coord_wkt
         )
 
-        return pd.Series({
-            "plot_wkt": final_wkt
-        })
-
-    # ========================================================================================================================================
-    # CREATE FINAL DATAFRAME WITH ONE GEOMETRY COLUMN
-    # ========================================================================================================================================
+        return pd.Series({"plot_wkt": final_wkt})
 
     geom_df = Data.apply(choose_geometry, axis=1)
 
@@ -478,104 +558,153 @@ def convert_to_geodf(Data):
 
     final_data = pd.concat([Data, geom_df], axis=1)
 
-    # ========================================================================================================================================
-    # FINAL DATA CLEANING
-    # ========================================================================================================================================
-
     final_data = final_data.fillna("")
 
     final_data.columns = final_data.columns.str.strip()
-
     final_data.columns = final_data.columns.str.replace(
         "\u200b", "", regex=False
     )
-
     final_data.columns = final_data.columns.str.lower()
 
-    # ========================================================================================================================================
-    # AREA VALIDATION
-    # ========================================================================================================================================
+    #========================================================================================================================================
+    # AREA CALCULATION
+    #========================================================================================================================================
 
-    if "area" in final_data.columns:
+    def compute_plot_area(data):
 
         geod = Geod(ellps="WGS84")
+        data = data.copy()
 
-        def compute_area_ha(wkt_str):
+        area_cols = [
+            col for col in data.columns
+            if "area" in normalize(col) or "size" in normalize(col)
+        ]
 
-            if pd.isna(wkt_str) or str(wkt_str).strip() == "":
-                return None
+        if not area_cols:
+            area_cols = ["plot_area_ha"]
+            data["plot_area_ha"] = ""
+
+        def calculate_area(geometry, existing_area):
+
+            if geometry is None or not str(geometry).strip():
+                return existing_area
 
             try:
-                geom = wkt.loads(str(wkt_str))
+                if isinstance(geometry, str):
+                    geometry = wkt.loads(geometry)
 
-                if isinstance(geom, Polygon):
+                if geometry is None or geometry.is_empty:
+                    return existing_area
 
-                    area, _ = geod.geometry_area_perimeter(geom)
-
+                if geometry.geom_type == "Polygon":
+                    area, _ = geod.geometry_area_perimeter(geometry)
                     return round(abs(area) / 10000, 3)
 
-                elif isinstance(geom, MultiPolygon):
+                elif geometry.geom_type == "MultiPolygon":
+                    total_area = 0
 
-                    area = sum(
-                        abs(geod.geometry_area_perimeter(poly)[0])
-                        for poly in geom.geoms
-                    )
+                    for polygon in geometry.geoms:
+                        area, _ = geod.geometry_area_perimeter(polygon)
+                        total_area += abs(area)
 
-                    return round(area / 10000, 3)
-
-                return None
+                    return round(total_area / 10000, 3)
 
             except Exception:
-                return None
+                return existing_area
 
-        computed_area = final_data["plot_wkt"].apply(compute_area_ha)
+            return existing_area
 
-        final_data["area"] = computed_area.fillna(final_data["area"])
+        for col in area_cols:
+
+            data[col] = data.apply(
+                lambda row: calculate_area(
+                    row["plot_wkt"],
+                    row[col]
+                ),
+                axis=1
+            )
+
+            data[col] = pd.to_numeric(
+                data[col], errors="coerce"
+            ).round(3)
+
+        return data
+
+    final_data = compute_plot_area(final_data)
 
     return final_data
 
-    # ========================================================================================================================================
-    # AREA VALIDATION
-    # ========================================================================================================================================
 
-    if "area" in final_data.columns:
+#========================================================================================================================================
+# AREA CALCULATION
+#========================================================================================================================================
+
+    def compute_plot_area(data):
 
         geod = Geod(ellps="WGS84")
+        data = data.copy()
 
-        def compute_area_ha(wkt_str):
+        area_cols = [
+            col for col in data.columns
+            if "area" in normalize(col) or "size" in normalize(col)
+        ]
 
-            if pd.isna(wkt_str) or str(wkt_str).strip() == "":
-                return None
+        def calculate_area(geometry, existing_area):
 
-            try:
-                geom = wkt.loads(str(wkt_str))
+            if geometry is None:
+                return existing_area
 
-                if isinstance(geom, Polygon):
-                    area, _ = geod.geometry_area_perimeter(geom)
-                    return round(abs(area) / 10000, 3)
+            if isinstance(geometry, str):
+                try:
+                    geometry = wkt.loads(geometry)
+                except Exception:
+                    return existing_area
 
-                elif isinstance(geom, MultiPolygon):
-                    area = sum(
-                        abs(geod.geometry_area_perimeter(poly)[0])
-                        for poly in geom.geoms
-                    )
-                    return round(area / 10000, 3)
+            if geometry is None or geometry.is_empty:
+                return existing_area
 
-                return None
+            geom_type = geometry.geom_type
 
-            except Exception:
-                return None
+            if geom_type == "Polygon":
+                area, _ = geod.geometry_area_perimeter(geometry)
+                return round(abs(area) / 10000, 3)
 
-        computed_area = final_data["plot_wkt"].apply(compute_area_ha)
+            elif geom_type == "MultiPolygon":
+                total_area = 0
 
-        final_data["area"] = computed_area.fillna(final_data["area"])
+                for polygon in geometry.geoms:
+                    area, _ = geod.geometry_area_perimeter(polygon)
+                    total_area += abs(area)
+
+                return round(total_area / 10000, 3)
+
+            return existing_area
+
+        for col in area_cols:
+
+            data[col] = data.apply(
+                lambda row: calculate_area(
+                    row["plot_wkt"],
+                    row[col]
+                ),
+                axis=1
+            )
+
+            data[col] = pd.to_numeric(
+                data[col], errors="coerce"
+            ).round(3)
+
+        return data
+
+
+    final_data = compute_plot_area(final_data)
 
     return final_data
 
 
 # ============================================================================================================================================
 # KML LOADING FUNCTION
-# ============================================================================
+# ============================================================================================================================================
 
 def load_kml(uploaded_file, ext):
     uploaded_file.seek(0)
@@ -887,10 +1016,10 @@ if uploaded_file:
     
 
     add_divider()
-    
+
     st.dataframe(
         final_data,
-        height=380,
+        height=450,
         use_container_width=True
     )
     
