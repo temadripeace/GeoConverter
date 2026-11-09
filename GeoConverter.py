@@ -19,7 +19,7 @@ from shapely.geometry import shape, Point, Polygon, MultiPolygon, MultiPoint
 #======================================================================================================================================
 
 st.set_page_config(
-    page_title="File Convertor",
+    page_title="File Converter",
     page_icon="sucafina.svg",
     layout="wide"
 )
