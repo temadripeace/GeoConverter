@@ -890,7 +890,7 @@ if uploaded_file:
     
     st.dataframe(
         final_data,
-        height=400,
+        height=380,
         use_container_width=True
     )
     
