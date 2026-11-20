@@ -1018,7 +1018,8 @@ if uploaded_file:
     st.dataframe(
         final_data,
         height=450,
-        use_container_width=True
+        use_container_width=True,
+        hide_index=True
     )
     
 # ============================================================================================================================
