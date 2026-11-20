@@ -1098,7 +1098,7 @@ if not final_data.empty:
 
                     gdf = gdf[gdf.geometry.notnull()]
 
-                    geojson_data = gdf.to_json().encode("utf-8")
+                    geojson_data = gdf.to_json(drop_id=True).encode("utf-8")
 
                     st.download_button(
                         "Download GeoJSON",
