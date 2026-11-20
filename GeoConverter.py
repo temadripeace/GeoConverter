@@ -1,4 +1,5 @@
 import io
+import os
 import re
 import json
 import zipfile
@@ -19,7 +20,7 @@ from shapely.geometry import shape, Point, Polygon, MultiPolygon, MultiPoint
 #======================================================================================================================================
 
 st.set_page_config(
-    page_title="File Converter",
+    page_title="File Convertor",
     page_icon="sucafina.svg",
     layout="wide"
 )
@@ -564,6 +565,7 @@ def convert_to_geodf(Data):
     final_data.columns = final_data.columns.str.replace(
         "\u200b", "", regex=False
     )
+
     #========================================================================================================================================
     # AREA CALCULATION
     #========================================================================================================================================
@@ -909,7 +911,7 @@ def load_file(file_bytes, ext):
         header_row = st.session_state.get("header_row", 1)
         final_data = pd.read_excel(file_bytes, header=header_row - 1)
 
-    elif ext == "kml":
+    elif ext in ["kml", "kmz"]:
         final_data = load_kml(file_bytes, ext)
 
     elif ext in ["geojson", "json"]:
@@ -938,8 +940,8 @@ with col1:
     )
 
     uploaded_file = st.file_uploader(
-        "Upload CSV, Excel, GeoJSON, KML, or ZIP",
-        type=["csv", "xls", "xlsx", "geojson", "kml", "zip"]
+        "Upload CSV, Excel, GeoJSON, KML, KMZ, or ZIP",
+        type=["csv", "xls", "xlsx", "geojson","json", "kml", "kmz", "zip"]
     )
 
     if uploaded_file is not None and uploaded_file.name.lower().endswith((".xls", ".xlsx")):
@@ -976,13 +978,14 @@ if uploaded_file:
 
                 ext = f.split(".")[-1].lower()
 
-                if ext not in ["csv", "xls", "xlsx", "geojson", "json", "kml"]:
+                if ext not in ["csv", "xls", "xlsx", "geojson", "json", "kml", "kmz"]:
                     continue
 
                 with zip_ref.open(f) as file_bytes:
                     data = load_file(file_bytes, ext)
 
                     if data is not None:
+                        data.insert(0, "source_file", os.path.splitext(os.path.basename(f))[0])
                         all_dfs.append(data)
 
         if not all_dfs:
