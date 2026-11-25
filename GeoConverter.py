@@ -903,9 +903,18 @@ def load_file(file_bytes, ext):
 
     if ext == "csv":
         raw_data = file_bytes.read()
+
         file_bytes.seek(0)
-        encoding = chardet.detect(raw_data)["encoding"] or "utf-8"
-        final_data = pd.read_csv(file_bytes, encoding=encoding)
+        
+        try:
+            final_data = pd.read_csv(file_bytes, encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            file_bytes.seek(0)
+            try:
+                final_data = pd.read_csv(file_bytes, encoding="latin1")
+            except Exception:
+                file_bytes.seek(0)
+                final_data = pd.read_csv(file_bytes, encoding="cp1252")
 
     elif ext in ["xls", "xlsx"]:
         header_row = st.session_state.get("header_row", 1)
